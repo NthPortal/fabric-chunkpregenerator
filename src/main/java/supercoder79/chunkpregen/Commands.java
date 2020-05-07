@@ -2,6 +2,8 @@ package supercoder79.chunkpregen;
 
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import net.fabricmc.fabric.api.registry.CommandRegistry;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
@@ -13,16 +15,20 @@ import net.minecraft.util.math.ChunkPos;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 
+//To anyone wanting to read this code: warning, it's extremely cursed
 public class Commands {
 	private static int threadsDone = 0;
 	private static ConcurrentLinkedQueue<ChunkPos> queue = new ConcurrentLinkedQueue<>();
 	private static int total = 1;
 	private static boolean shouldGenerate = false;
 	private static ExecutorService executor;
+	private static final ThreadFactory threadFactory = new DefaultThreadFactory("ChunkPreGeneration", false, 3); //funny thread priority
 
 	public static void init() {
-        executor = Executors.newCachedThreadPool();
+        executor = Executors.newCachedThreadPool(threadFactory);
+
 		CommandRegistry.INSTANCE.register(false, dispatcher -> {
 			LiteralArgumentBuilder<ServerCommandSource> lab = CommandManager.literal("pregen")
 					.requires(executor -> executor.hasPermissionLevel(2));
@@ -81,15 +87,9 @@ public class Commands {
 			}));
 
 			lab.then(CommandManager.literal("help").
-					executes(cmd -> {
-				ServerCommandSource source = cmd.getSource();
+					executes(Commands::displayHelp));
 
-				source.sendFeedback(new LiteralText("/pregen start <radius> - Pregenerate a square centered on the player that is <radius> chunks long and wide."), false);
-				source.sendFeedback(new LiteralText("/pregen stop - Stop pregeneration and displays the amount completed."), false);
-				source.sendFeedback(new LiteralText("/pregen status - Display the amount of chunks pregenerated."), false);
-				source.sendFeedback(new LiteralText("/pregen help - Display this message."), false);
-				return 1;
-			}));
+			lab.executes(Commands::displayHelp);
 
 			dispatcher.register(lab);
 		});
@@ -101,11 +101,20 @@ public class Commands {
 		if (amount % 100 == 0) {
 			source.sendFeedback(new LiteralText("Pregenerated " + (((double)(amount) / (double)(total))) * 100 + "%"), true);
 		}
+
+		if (amount % 500 == 0) {
+			//ensure the world is saved
+			source.getMinecraftServer().save(true, true, true);
+
+			//haha yes funny gc
+			System.gc();
+		}
 	}
 
 	private static void finishThread(ServerCommandSource source) {
 		threadsDone++;
 		if (threadsDone == 4) {
+			source.getMinecraftServer().save(false, true, true);
 			threadsDone = 0;
 			source.sendFeedback(new LiteralText("Pregeneration Done!"), true);
 			shouldGenerate = false;
@@ -120,6 +129,16 @@ public class Commands {
         }
     }
 
+	private static int displayHelp(CommandContext<ServerCommandSource> cmd) {
+		ServerCommandSource source = cmd.getSource();
+
+		source.sendFeedback(new LiteralText("/pregen start <radius> - Pregenerate a square centered on the player that is <radius> chunks long and wide."), false);
+		source.sendFeedback(new LiteralText("/pregen stop - Stop pregeneration and displays the amount completed."), false);
+		source.sendFeedback(new LiteralText("/pregen status - Display the amount of chunks pregenerated."), false);
+		source.sendFeedback(new LiteralText("/pregen help - Display this message."), false);
+		return 1;
+	}
+
 	static class ChunkWorker implements Runnable {
 		private ServerCommandSource source;
 
@@ -132,6 +151,9 @@ public class Commands {
 			ServerWorld world = source.getWorld();
 
 			while (shouldGenerate) {
+				//make sure the server doesn't stall itself to death
+				if (source.getMinecraftServer().getTickTime() > 60) continue;
+
 				ChunkPos pos = queue.poll();
 				if (pos == null) break;
 
